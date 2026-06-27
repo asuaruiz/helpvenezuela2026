@@ -533,6 +533,17 @@ function candCard(c){
 const label=d=>({same_located:"Es la misma persona — localizada con vida",same_deceased:"Es la misma persona — falleció",same_missing:"Es la misma persona — sigue desaparecida",not_same:"No es la misma persona",unsure:"Sin determinar"}[d]||d||"—");
 const shortLabel=d=>({same_located:"localizada con vida",same_deceased:"falleció",same_missing:"sigue desaparecida",not_same:"no era la misma",unsure:"sin determinar"}[d]||"revisado");
 const jsId=id=>id.replace(/\\/g,"\\\\").replace(/'/g,"\\'");
+// Slug legible a partir del nombre, para URLs compartibles tipo ?c=ID&s=maria-perez
+function slugify(s){
+  return String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"")
+    .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,60)||"ficha";
+}
+// Construye la URL compartible de una ficha conservando el hash (#operador) actual.
+function fichaUrl(id,name){
+  const u=new URL(location.href); u.search=""; u.hash=location.hash;
+  u.searchParams.set("c",id); u.searchParams.set("s",slugify(name));
+  return u.href;
+}
 
 async function decide(btn,clusterId,decision){
   const card=btn.closest(".cand"); const inModal=!card;
@@ -572,22 +583,46 @@ const clusterRows=(data)=>data.map(c=>`
       `<span class="statustag ${isFound(c.status)?"found":"missing"}"><span class="dot"></span>${stateWord(c.status)}</span>`}
   </div>`).join("");
 
-async function openCluster(id){
+async function openCluster(id,push=true){
   const m=document.getElementById("modal"), b=document.getElementById("modalBody");
   b.innerHTML='<div class="loader"><div class="spin"></div></div>'; m.classList.add("on");
   let data; try{ data=await rpc("public_cluster_with_records",{p_id:id}); }catch(e){ data=null; }
   if(!data||!data.cluster){ b.innerHTML='<div class="empty"><div class="big">No se pudo abrir la ficha</div>Inténtalo de nuevo.</div>'; return; }
   const cl=data.cluster, decisions=data.decisions||[];
   const recs=(data.records||[]).slice().sort((a,b)=>(isFound(b.status)?1:0)-(isFound(a.status)?1:0));
+  // Refleja la ficha en la URL con un slug legible para que el enlace sea compartible.
+  const url=fichaUrl(id,cl.name);
+  if(push && location.href!==url) history.pushState({c:id},"",url);
   b.innerHTML=`<div class="cand-head" style="padding:22px 22px 0">
       <h3>${esc(cl.name)}</h3>
-      <div class="meta">${fmtAge(cl.age)} · ${esc(cl.location||"ubicación no reportada")} · ${cl.n_records} reportes en ${cl.n_sources} plataforma(s)</div></div>
+      <div class="meta">${fmtAge(cl.age)} · ${esc(cl.location||"ubicación no reportada")} · ${cl.n_records} reportes en ${cl.n_sources} plataforma(s)</div>
+      <button class="more" style="margin-top:10px" onclick="shareFicha('${jsId(id)}',${jsArg(cl.name)})">🔗 Compartir enlace</button></div>
     ${OPERADOR && cl.has_conflict && !cl.resolved ? actionsHtml(cl.id):""}
     ${cl.resolved?`<div class="decided">✓ Ya revisado: ${esc(shortLabel(cl.resolved_decision))}</div>`:""}
     ${decisions.length?`<div class="decided">${decisions.map(d=>`✓ ${esc(label(d.decision))} — ${esc(d.decided_by||"")} ${d.note?'· "'+esc(d.note)+'"':""}`).join("<br>")}</div>`:""}
     <div class="unified">${unifiedSummary(recs)}</div>`;
 }
-function closeModal(){document.getElementById("modal").classList.remove("on")}
+function closeModal(){
+  document.getElementById("modal").classList.remove("on");
+  // Al cerrar, quita ?c=&s= de la URL (conservando el hash) sin recargar.
+  if(new URL(location.href).searchParams.has("c")){
+    const u=new URL(location.href); u.search=""; history.pushState({},"",u.pathname+u.hash);
+  }
+}
+async function shareFicha(id,name){
+  const url=fichaUrl(id,name);
+  try{
+    if(navigator.share){ await navigator.share({title:name||"Ficha",url}); return; }
+    await navigator.clipboard.writeText(url); toast("Enlace copiado");
+  }catch(e){ try{ await navigator.clipboard.writeText(url); toast("Enlace copiado"); }catch{} }
+}
+// Abre la ficha indicada en la URL (al cargar o al navegar atrás/adelante).
+function syncFichaFromUrl(){
+  const c=new URL(location.href).searchParams.get("c");
+  if(c) openCluster(c,false);
+  else document.getElementById("modal").classList.remove("on");
+}
+window.addEventListener("popstate",syncFichaFromUrl);
 document.getElementById("modal").addEventListener("click",e=>{if(e.target.id==="modal")closeModal()});
 
 /* ---------- HOSPITALES ---------- */
@@ -807,7 +842,7 @@ document.getElementById("showPhotos").onchange=e=>{localStorage.setItem("showPho
 {const rn=document.getElementById("revisorName"); rn.value=localStorage.getItem("revisor")||""; rn.oninput=()=>localStorage.setItem("revisor",rn.value.trim());}
 document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeZoom();closeModal();}});
 let toastT; function toast(m){const t=document.getElementById("toast"); t.textContent="✓ "+m; t.classList.add("on"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("on"),2400);}
-Object.assign(window,{decide,openCluster,closeModal,go,loadQueue,loadAll,showOne,zoom,closeZoom});
+Object.assign(window,{decide,openCluster,closeModal,go,loadQueue,loadAll,showOne,zoom,closeZoom,shareFicha});
 
 // Service worker DESACTIVADO: causaba quedarse pegado en versiones viejas. Lo desregistramos
 // y limpiamos su caché para que cualquiera atascado reciba siempre la versión fresca.
@@ -820,6 +855,8 @@ if(OPERADOR){
 }
 loadStats();
 if(OPERADOR) loadQueue(true);
+// Si la URL trae ?c=ID (enlace compartido), abre esa ficha directamente.
+syncFichaFromUrl();
 // Entrada principal para familias: foco en el buscador.
 setTimeout(()=>{const q=document.getElementById("q"); if(q && window.innerWidth>760) q.focus();},120);
 </script>
