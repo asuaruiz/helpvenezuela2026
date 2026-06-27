@@ -1,0 +1,24 @@
+{
+  "name": "scrap",
+  "version": "1.0.0",
+  "main": "idx.js",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check mirror_photos.mjs && node --check refresh.mjs && node --check build_and_load.mjs",
+    "mirror:photos": "node mirror_photos.mjs",
+    "mirror:photos:dry": "node mirror_photos.mjs --dry-run",
+    "measure:read": "node scripts/measure-read-endpoints.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
+    "playwright": "^1.61.1",
+    "turbo-stream": "^3.2.0"
+  },
+  "devDependencies": {
+    "pg": "^8.22.0"
+  }
+}

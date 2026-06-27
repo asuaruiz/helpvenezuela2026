@@ -1,0 +1,14 @@
+.env
+.env.*
+.supabase_keys.json
+.supabase_secret
+supabase/.temp/
+node_modules/
+*.log
+personas*.json
+personas*.csv
+unified.json
+unified.csv
+posibles_localizados.json
+posibles_localizados.csv
+.vercel
