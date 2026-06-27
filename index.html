@@ -154,6 +154,20 @@
   .row-item .nm small{display:block; color:var(--muted); font-weight:400; font-size:12.5px; margin-top:2px}
   .row-item .nm .src-line{color:var(--faint); font-size:11.5px; margin-top:3px}
 
+  .ulist{background:linear-gradient(180deg,var(--panel),var(--ink2)); border:1px solid var(--line); border-radius:14px; margin-bottom:12px; overflow:hidden}
+  .ulist summary{list-style:none; cursor:pointer; padding:15px 18px; display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+  .ulist summary::-webkit-details-marker{display:none}
+  .ulist summary:hover{background:rgba(240,169,59,.05)}
+  .ulist .ulist-h{display:flex; flex-direction:column; margin-right:auto}
+  .ulist .ulist-h b{font-size:15.5px}
+  .ulist .ulist-h small{color:var(--muted); font-size:12.5px; margin-top:3px}
+  .ulist .ulist-counts{font-size:12.5px; color:var(--muted); white-space:nowrap}
+  .ulist .ulist-rows{padding:4px 10px 12px; border-top:1px solid var(--line)}
+  .ulist-row{display:flex; align-items:center; gap:12px; padding:9px 8px; border-radius:9px}
+  .ulist-row+.ulist-row{border-top:1px solid rgba(53,47,34,.5)}
+  .ulist-row[onclick]:hover{background:rgba(240,169,59,.08)}
+  .ulist-row .nm{font-weight:600; margin-right:auto; font-size:14.5px}
+  .ulist-row .nm small{color:var(--muted); font-weight:400; font-size:12px}
   .empty{text-align:center; padding:54px 20px; color:var(--muted)}
   .empty .big{font-family:var(--serif); font-style:italic; font-size:22px; color:var(--paper); margin-bottom:8px}
   .loader{display:flex; justify-content:center; padding:48px; color:var(--faint)}
@@ -234,6 +248,7 @@
     <nav class="tabs">
       <button data-v="buscar" class="active">Buscar persona</button>
       <button data-v="hospitales">Foto de lista</button>
+      <button data-v="listas">Listas subidas</button>
       <button data-v="todos">Ver todos</button>
       <button data-v="resumen">Resumen</button>
       <button data-v="revisar" id="tab-revisar" style="display:none">Revisar</button>
@@ -319,6 +334,13 @@
         <div class="empty">Selecciona una foto para empezar.</div>
       </div>
     </div>
+  </section>
+
+  <!-- LISTAS SUBIDAS -->
+  <section class="view" id="v-listas">
+    <p class="narrative" style="font-size:16px">Listas de hospitales, refugios y centros de atención que la gente ha subido. Cada nombre en una lista se marca como <b class="green">localizado</b>. Toca una persona para ver su ficha.</p>
+    <div id="listsBox"></div>
+    <div id="listsMore"></div>
   </section>
 
   <!-- RESUMEN -->
@@ -539,8 +561,8 @@ function slugify(s){
     .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,60)||"ficha";
 }
 // Rutas con slug legible para cada pestaña (deep-link). buscar = raíz.
-const TAB_PATH={buscar:"/",hospitales:"/foto-de-lista",todos:"/ver-todos",resumen:"/resumen",revisar:"/revisar"};
-const PATH_TAB={"":"buscar","/":"buscar","/foto-de-lista":"hospitales","/ver-todos":"todos","/resumen":"resumen","/revisar":"revisar"};
+const TAB_PATH={buscar:"/",hospitales:"/foto-de-lista",listas:"/listas",todos:"/ver-todos",resumen:"/resumen",revisar:"/revisar"};
+const PATH_TAB={"":"buscar","/":"buscar","/foto-de-lista":"hospitales","/listas":"listas","/ver-todos":"todos","/resumen":"resumen","/revisar":"revisar"};
 let curView="buscar";
 // URL compartible de una ficha: /ficha/<slug>/<id>, conservando el hash (#operador).
 function fichaUrl(id,name){
@@ -713,6 +735,55 @@ function hospitalCandidate(c){
   </div>`;
 }
 
+/* ---------- LISTAS SUBIDAS ---------- */
+const fmtDate=(s)=>{ try{ return new Date(s).toLocaleDateString("es",{day:"numeric",month:"short",year:"numeric"}); }catch{ return ""; } };
+const LIST_RESULT={
+  creado_localizado:{t:"localizado (nuevo)",c:"found"},
+  vinculado_localizado:{t:"localizado",c:"found"},
+  ya_localizado:{t:"ya localizado",c:"found"},
+  posible_match_pendiente:{t:"posible coincidencia",c:"missing"},
+  sin_coincidencia:{t:"sin coincidencia",c:"missing"},
+};
+let listsBusy=false, listsDone=false, listsOffset=0;
+async function loadLists(reset){
+  const box=document.getElementById("listsBox"), more=document.getElementById("listsMore");
+  if(reset){ listsOffset=0; listsDone=false; box.innerHTML=""; }
+  if(listsBusy||listsDone) return; listsBusy=true;
+  if(reset) box.innerHTML='<div class="loader"><div class="spin"></div></div>';
+  let data; try{ data=await rpc("public_hospital_lists",{p_limit:30,p_offset:listsOffset}); }catch(e){ data=null; }
+  if(reset) box.innerHTML="";
+  if(!Array.isArray(data)){ box.innerHTML=`<div class="empty"><div class="big">Sin conexión</div>Inténtalo de nuevo.</div>`; listsBusy=false; return; }
+  if(!data.length && !listsOffset){ box.innerHTML=`<div class="empty"><div class="big">Aún no hay listas</div>Sube una foto en "Foto de lista" para empezar.</div>`; listsBusy=false; listsDone=true; return; }
+  box.insertAdjacentHTML("beforeend", data.map(listCard).join(""));
+  listsOffset+=data.length;
+  if(data.length<30){ listsDone=true; more.innerHTML=""; } else more.innerHTML='<button class="more" onclick="loadLists(false)">Ver más listas</button>';
+  listsBusy=false;
+}
+function listCard(l){
+  const items=Array.isArray(l.extracted)?l.extracted:[];
+  const rows=items.map(it=>{
+    const r=LIST_RESULT[it.resultado]||{t:it.resultado||"",c:"missing"};
+    const cid=(it.candidate_ids||[])[0];
+    const open=cid?` onclick="openCluster('${jsId(cid)}')" style="cursor:pointer"`:"";
+    return `<div class="ulist-row"${open}>
+      <span class="nm">${esc(it.nombre||"nombre sin leer")}${it.edad?` <small>${esc(it.edad)} años</small>`:""}</span>
+      <span class="statustag ${r.c}"><span class="dot"></span>${esc(r.t)}</span>
+    </div>`;
+  }).join("");
+  return `<div class="ulist">
+    <details>
+      <summary>
+        <span class="ulist-h">
+          <b>${esc(l.hospital||"Centro sin nombre")}</b>
+          <small>${fmtDate(l.created_at)}${l.uploaded_by?" · subido por "+esc(l.uploaded_by):""}</small>
+        </span>
+        <span class="ulist-counts">${l.n_items} nombre${l.n_items===1?"":"s"} · <b class="green">${l.n_located} localizado${l.n_located===1?"":"s"}</b></span>
+      </summary>
+      <div class="ulist-rows">${rows||'<div class="h-empty">No se leyeron nombres en esta lista.</div>'}</div>
+    </details>
+  </div>`;
+}
+
 /* ---------- CHAT DE AYUDA ---------- */
 let chatImage=null, chatSession=localStorage.getItem("chatSession")||"";
 const chatBody=document.getElementById("chatBody"), chatPanel=document.getElementById("chatPanel");
@@ -848,6 +919,7 @@ function go(v,push=true){
   document.querySelectorAll(".view").forEach(s=>s.classList.toggle("on",s.id==="v-"+v));
   if(v==="revisar"&&!document.querySelector("#queue .cand")) loadQueue(true);
   if(v==="todos"&&!document.querySelector("#allList .row-item")) loadAll(true);
+  if(v==="listas"&&!document.querySelector("#listsBox .ulist")) loadLists(true);
   if(v==="resumen") loadDash();
   window.scrollTo(0,0);
 }
@@ -858,7 +930,7 @@ document.getElementById("showPhotos").onchange=e=>{localStorage.setItem("showPho
 {const rn=document.getElementById("revisorName"); rn.value=localStorage.getItem("revisor")||""; rn.oninput=()=>localStorage.setItem("revisor",rn.value.trim());}
 document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeZoom();closeModal();}});
 let toastT; function toast(m){const t=document.getElementById("toast"); t.textContent="✓ "+m; t.classList.add("on"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("on"),2400);}
-Object.assign(window,{decide,openCluster,closeModal,go,loadQueue,loadAll,showOne,zoom,closeZoom,shareFicha});
+Object.assign(window,{decide,openCluster,closeModal,go,loadQueue,loadAll,loadLists,showOne,zoom,closeZoom,shareFicha});
 
 // Service worker DESACTIVADO: causaba quedarse pegado en versiones viejas. Lo desregistramos
 // y limpiamos su caché para que cualquiera atascado reciba siempre la versión fresca.
