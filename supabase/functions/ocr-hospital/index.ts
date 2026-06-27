@@ -43,11 +43,13 @@ Deno.serve(async (req)=>{
     const matches=[];
     for(const p of personas.slice(0,60)){
       const nm=String(p?.nombre||"").trim(); if(!nm) continue;
-      const toks=norm(nm).split(" ").filter(t=>t.length>=3);
+      const toks=norm(nm).split(" ").filter(t=>t.length>=2);
       let cands=[];
       if(toks.length){
-        const { data } = await sb.from("clusters").select("id,name,age,location,status,has_conflict").ilike("name",`%${nm.split(/\s+/).slice(-1)[0]}%`).limit(8);
-        cands=(data||[]).filter(c=>{const cn=norm(c.name); return toks.filter(t=>cn.includes(t)).length>=Math.min(2,toks.length);}).slice(0,5);
+        // Matching insensible a acentos y a orden de nombres (misma lógica que la búsqueda
+        // pública). Antes un ilike por la última palabra con acento perdía "Misaira Pérez".
+        const { data } = await sb.rpc("public_search_clusters",{p_term:nm,p_filter:"",p_limit:5,p_offset:0});
+        cands=(data||[]).slice(0,5);
       }
       matches.push({extracted:p,candidates:cands});
     }
