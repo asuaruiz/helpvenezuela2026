@@ -34,6 +34,47 @@ async function extractPersonas(image:string, OPENAI:string){
   return { personas:[], error:lastErr };
 }
 
+// ¿Son "la misma persona" dos nombres? Coincidencia por tokens (acentos/orden ya normalizados):
+// uno es subconjunto del otro y comparten >=2 tokens. Tolera nombres más largos/cortos
+// (ej. "Adrian Hurtado" ~ "Adrian Jose Hurtado", "Andy Leon" ~ "Andy Leon (Menor)").
+function sameName(a:string, b:string){
+  const A=norm(a).split(" ").filter((t)=>t.length>=2);
+  const B=norm(b).split(" ").filter((t)=>t.length>=2);
+  if(A.length<2 || B.length<2) return false;
+  const overlap=A.filter((t)=>B.includes(t)).length;
+  return overlap>=2 && (A.every((t)=>B.includes(t)) || B.every((t)=>A.includes(t)));
+}
+
+function hospitalRecord(key:string, nm:string, p:any, loc:string, note:string, cid:string, nowIso:string){
+  const age = (typeof p?.edad==="number" && p.edad>0 && p.edad<120) ? Math.round(p.edad) : null;
+  return { pk:"hospital_list:"+key, source:"hospital_list", source_id:key, name:nm.slice(0,200), name_norm:norm(nm),
+    age, gender:null, location:loc, status:"found", photo:null, id_number:null, contact:null,
+    description:note, source_date:nowIso, cluster_id:cid, verified:false };
+}
+
+// Adjunta el "localizado" de la lista a un reporte EXISTENTE (sin crear cluster nuevo):
+// añade un record a ese cluster y lo marca como localizado. Best-effort.
+async function attachLocalized(sb:any, cluster:any, nm:string, p:any, hospital:string|null, nowIso:string){
+  try{
+    const key = (await sha256(norm(nm)+"|"+norm(hospital||"hospital"))).slice(0,24);
+    const loc = String(hospital||"Hospital/centro de atención").slice(0,200);
+    const note = [p?.estado, p?.nota].filter(Boolean).map((x:any)=>String(x).slice(0,160)).join(" · ") || `Aparece en lista de ${loc}`;
+    const { error: re } = await sb.from("records").upsert(hospitalRecord(key, nm, p, loc, note, cluster.id, nowIso), { onConflict:"pk" });
+    if(re) return false;
+    // Recalcula fuentes y conteos a partir de los records reales del cluster.
+    const { data: recs } = await sb.from("records").select("source").eq("cluster_id", cluster.id);
+    const sources=[...new Set((recs||[]).map((r:any)=>r.source))];
+    await sb.from("clusters").update({ status:"found", any_found:true, resolved:true, resolved_decision:"same_located",
+      sources, n_sources:sources.length, n_records:(recs||[]).length }).eq("id", cluster.id);
+    // Deja constancia de la decisión (sin duplicar si ya existe una de la lista de hospital).
+    const { data: prev } = await sb.from("decisions").select("id").eq("cluster_id", cluster.id).eq("decided_by","lista-hospital").limit(1);
+    if(!prev || !prev.length){
+      await sb.from("decisions").insert({ cluster_id:cluster.id, decision:"same_located", decided_by:"lista-hospital", note:`Aparece en lista de ${loc}` });
+    }
+    return true;
+  }catch{ return false; }
+}
+
 // Crea (o reusa, dedup por nombre+centro) un cluster + record "localizado" para los nombres
 // de la lista que no coinciden con nadie del registro. Best-effort: si falla, no rompe el OCR.
 async function createLocalized(sb:any, nm:string, p:any, hospital:string|null, nowIso:string){
@@ -46,11 +87,7 @@ async function createLocalized(sb:any, nm:string, p:any, hospital:string|null, n
     const cluster = { id:cid, name:nm.slice(0,200), age, location:loc, status:"found", sources:["hospital_list"], n_sources:1, n_records:1, has_conflict:false, any_found:true, confidence:null, resolved:true, resolved_decision:"same_located" };
     const { error: ce } = await sb.from("clusters").upsert(cluster, { onConflict:"id" });
     if(ce) return null;
-    const { error: re } = await sb.from("records").upsert({
-      pk:"hospital_list:"+key, source:"hospital_list", source_id:key, name:nm.slice(0,200), name_norm:norm(nm),
-      age, gender:null, location:loc, status:"found", photo:null, id_number:null, contact:null,
-      description:note, source_date:nowIso, cluster_id:cid, verified:false,
-    }, { onConflict:"pk" });
+    const { error: re } = await sb.from("records").upsert(hospitalRecord(key, nm, p, loc, note, cid, nowIso), { onConflict:"pk" });
     if(re) return null;
     return cluster;
   }catch{ return null; }
@@ -89,7 +126,7 @@ Deno.serve(async (req)=>{
     const nowIso = new Date().toISOString();
     const isFound = (s:any)=> s==="found" || s==="found_alive";
     const matches:any[] = [];
-    let created = 0, already = 0;
+    let created = 0, attached = 0, already = 0;
     for(const p of personas.slice(0,80)){
       const nm=String(p?.nombre||"").trim(); if(!nm) continue;
       const toks=norm(nm).split(" ").filter((t)=>t.length>=2);
@@ -99,28 +136,33 @@ Deno.serve(async (req)=>{
         const { data } = await sb.rpc("public_search_clusters",{p_term:nm,p_filter:"",p_limit:5,p_offset:0});
         cands=(data||[]).slice(0,5);
       }
-      // Estar en la lista del hospital = la persona FUE LOCALIZADA. Si no existe ya un reporte
-      // localizado con ese nombre, se crea como localizado. Los reportes "por localizar" con el
-      // mismo nombre se muestran aparte para que un humano confirme si es la misma persona.
-      const alreadyLocated = cands.some((c)=>isFound(c.status));
-      let wasCreated=false;
-      if(toks.length>=2 && !alreadyLocated){
+      // Estar en la lista del hospital = la persona FUE LOCALIZADA.
+      // 1) Si hay un reporte EXISTENTE que es la misma persona (match por tokens), se le ADJUNTA
+      //    el localizado y se marca ese reporte como localizado — NUNCA se crea un duplicado.
+      // 2) Si no hay ninguna coincidencia, se crea un nuevo reporte localizado.
+      const twin = cands.find((c)=>sameName(nm, c.name));
+      let result="sin_coincidencia";
+      if(twin){
+        const ok = await attachLocalized(sb, twin, nm, p, hospital||null, nowIso);
+        if(ok){ attached++; result = isFound(twin.status) ? "ya_localizado" : "vinculado_localizado"; }
+        else result = "posible_match_pendiente";
+      }else if(toks.length>=2){
         const c = await createLocalized(sb, nm, p, hospital||null, nowIso);
-        if(c){ wasCreated=true; created++; }
+        if(c){ created++; result="creado_localizado"; }
       }
-      if(alreadyLocated) already++;
-      matches.push({ extracted:p, candidates:cands, created:wasCreated, alreadyLocated });
+      matches.push({ extracted:p, candidates:cands, result,
+        created:result==="creado_localizado", attached:result==="vinculado_localizado" || result==="ya_localizado",
+        attachedTo: twin?.id||null });
     }
-    const total_matched = already;
+    const total_located = attached + created;
 
-    // Guardar la lista YA matcheada (qué se encontró y qué se creó).
+    // Guardar la lista YA matcheada (qué se encontró, vinculó o creó).
     const saved = matches.map((m)=>({
       nombre:m.extracted?.nombre||null, edad:m.extracted?.edad??null, estado:m.extracted?.estado??null,
-      resultado: m.created ? "creado_localizado" : (m.alreadyLocated ? "ya_localizado" : (m.candidates.length ? "posible_match_pendiente" : "sin_coincidencia")),
-      candidate_ids: m.candidates.map((c:any)=>c.id),
+      resultado: m.result, candidate_ids: m.candidates.map((c:any)=>c.id),
     }));
-    await sb.from("hospital_lists").insert({ hospital:hospital||null, uploaded_by:uploaded_by||null, extracted:saved, matched_count:total_matched });
+    await sb.from("hospital_lists").insert({ hospital:hospital||null, uploaded_by:uploaded_by||null, extracted:saved, matched_count:total_located });
 
-    return json({ personas, matches, total_matched, created_count:created });
+    return json({ personas, matches, total_located, attached_count:attached, created_count:created });
   }catch(e){ return json({error:errorMessage(e)},500); }
 });

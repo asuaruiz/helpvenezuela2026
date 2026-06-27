@@ -538,10 +538,14 @@ function slugify(s){
   return String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"")
     .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,60)||"ficha";
 }
-// Construye la URL compartible de una ficha conservando el hash (#operador) actual.
+// Rutas con slug legible para cada pestaña (deep-link). buscar = raíz.
+const TAB_PATH={buscar:"/",hospitales:"/foto-de-lista",todos:"/ver-todos",resumen:"/resumen",revisar:"/revisar"};
+const PATH_TAB={"":"buscar","/":"buscar","/foto-de-lista":"hospitales","/ver-todos":"todos","/resumen":"resumen","/revisar":"revisar"};
+let curView="buscar";
+// URL compartible de una ficha: /ficha/<slug>/<id>, conservando el hash (#operador).
 function fichaUrl(id,name){
-  const u=new URL(location.href); u.search=""; u.hash=location.hash;
-  u.searchParams.set("c",id); u.searchParams.set("s",slugify(name));
+  const u=new URL(location.href); u.search="";
+  u.pathname="/ficha/"+slugify(name)+"/"+encodeURIComponent(id);
   return u.href;
 }
 
@@ -590,9 +594,9 @@ async function openCluster(id,push=true){
   if(!data||!data.cluster){ b.innerHTML='<div class="empty"><div class="big">No se pudo abrir la ficha</div>Inténtalo de nuevo.</div>'; return; }
   const cl=data.cluster, decisions=data.decisions||[];
   const recs=(data.records||[]).slice().sort((a,b)=>(isFound(b.status)?1:0)-(isFound(a.status)?1:0));
-  // Refleja la ficha en la URL con un slug legible para que el enlace sea compartible.
+  // Refleja la ficha en la URL (/ficha/<slug>/<id>) para que el enlace sea compartible.
   const url=fichaUrl(id,cl.name);
-  if(push && location.href!==url) history.pushState({c:id},"",url);
+  if(push && location.href!==url) history.pushState({ficha:id},"",url);
   b.innerHTML=`<div class="cand-head" style="padding:22px 22px 0">
       <h3>${esc(cl.name)}</h3>
       <div class="meta">${fmtAge(cl.age)} · ${esc(cl.location||"ubicación no reportada")} · ${cl.n_records} reportes en ${cl.n_sources} plataforma(s)</div>
@@ -604,9 +608,9 @@ async function openCluster(id,push=true){
 }
 function closeModal(){
   document.getElementById("modal").classList.remove("on");
-  // Al cerrar, quita ?c=&s= de la URL (conservando el hash) sin recargar.
-  if(new URL(location.href).searchParams.has("c")){
-    const u=new URL(location.href); u.search=""; history.pushState({},"",u.pathname+u.hash);
+  // Al cerrar una ficha, vuelve a la ruta de la pestaña actual (sin recargar).
+  if(location.pathname.startsWith("/ficha/")){
+    const u=new URL(location.href); history.pushState({},"",(TAB_PATH[curView]||"/")+u.hash);
   }
 }
 async function shareFicha(id,name){
@@ -616,13 +620,17 @@ async function shareFicha(id,name){
     await navigator.clipboard.writeText(url); toast("Enlace copiado");
   }catch(e){ try{ await navigator.clipboard.writeText(url); toast("Enlace copiado"); }catch{} }
 }
-// Abre la ficha indicada en la URL (al cargar o al navegar atrás/adelante).
-function syncFichaFromUrl(){
-  const c=new URL(location.href).searchParams.get("c");
-  if(c) openCluster(c,false);
-  else document.getElementById("modal").classList.remove("on");
+// Resuelve la URL actual a la vista/ficha correspondiente (al cargar o navegar atrás/adelante).
+function route(){
+  const path=location.pathname.replace(/\/+$/,"")||"/";
+  const m=path.match(/^\/ficha\/[^/]*\/(.+)$/);
+  if(m){ openCluster(decodeURIComponent(m[1]),false); return; }
+  document.getElementById("modal").classList.remove("on");
+  let v=PATH_TAB[path]||"buscar";
+  if(v==="revisar"&&!OPERADOR) v="buscar";
+  go(v,false);
 }
-window.addEventListener("popstate",syncFichaFromUrl);
+window.addEventListener("popstate",route);
 document.getElementById("modal").addEventListener("click",e=>{if(e.target.id==="modal")closeModal()});
 
 /* ---------- HOSPITALES ---------- */
@@ -675,13 +683,18 @@ function renderHospitalResults(data){
   const box=document.getElementById("hospitalResults");
   const matches=data.matches||[];
   if(!matches.length){box.innerHTML=`<div class="empty"><div class="big">Sin nombres detectados</div>Prueba con una foto más nítida.</div>`; return;}
-  const created=data.created_count||0;
-  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · ${data.total_matched||0} ya localizados${created?` · <span class="green">${created} agregados como localizados</span>`:""}</div>`+
+  const created=data.created_count||0, attached=data.attached_count||0, located=data.total_located??(created+attached);
+  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · <span class="green">${located} marcados como localizados</span>${attached?` · ${attached} vinculados a un reporte existente`:""}${created?` · ${created} nuevos`:""}</div>`+
     matches.map(m=>{
       const p=m.extracted||{}, c=m.candidates||[];
-      const badge=m.created?'<span class="verif">✓ agregado como localizada</span>':(p.nota?`<span>${esc(p.nota)}</span>`:"");
+      const badge=m.attached?'<span class="verif">✓ vinculada y marcada como localizada</span>'
+        :m.created?'<span class="verif">✓ agregada como localizada (nuevo)</span>'
+        :(p.nota?`<span>${esc(p.nota)}</span>`:"");
       let body;
-      if(m.created){
+      if(m.attached){
+        // Se unió a un reporte existente: lo mostramos para dar contexto, sin pregunta.
+        body=c.length?`<div style="padding:7px 13px 0;color:var(--faint);font-size:12px;font-style:italic">Reporte vinculado en el registro:</div><div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`:"";
+      }else if(m.created){
         body=c.length
           ? `<div style="padding:7px 13px 0;color:var(--faint);font-size:12px;font-style:italic">Reportes previos con ese nombre — ¿es la misma persona?</div><div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`
           : "";
@@ -827,7 +840,10 @@ async function loadAll(reset){
 document.getElementById("allFilters").addEventListener("click",e=>{const b=e.target.closest(".chip"); if(!b)return; document.querySelectorAll("#allFilters .chip").forEach(c=>c.classList.remove("on")); b.classList.add("on"); allF=b.dataset.af; loadAll(true);});
 
 /* ---------- nav ---------- */
-function go(v){
+function go(v,push=true){
+  curView=v;
+  // Refleja la pestaña en la URL con su slug (/ver-todos, /resumen, etc.).
+  if(push){ const u=new URL(location.href); history.pushState({v},"",(TAB_PATH[v]||"/")+u.hash); }
   document.querySelectorAll("nav.tabs button").forEach(b=>b.classList.toggle("active",b.dataset.v===v));
   document.querySelectorAll(".view").forEach(s=>s.classList.toggle("on",s.id==="v-"+v));
   if(v==="revisar"&&!document.querySelector("#queue .cand")) loadQueue(true);
@@ -855,8 +871,8 @@ if(OPERADOR){
 }
 loadStats();
 if(OPERADOR) loadQueue(true);
-// Si la URL trae ?c=ID (enlace compartido), abre esa ficha directamente.
-syncFichaFromUrl();
+// Resuelve la URL actual (ficha compartida o pestaña) al cargar.
+route();
 // Entrada principal para familias: foco en el buscador.
 setTimeout(()=>{const q=document.getElementById("q"); if(q && window.innerWidth>760) q.focus();},120);
 </script>
