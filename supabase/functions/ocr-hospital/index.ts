@@ -9,6 +9,53 @@ async function sha256(s:string){
   const hash=await crypto.subtle.digest("SHA-256",data);
   return [...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,"0")).join("");
 }
+
+const PROMPT = "Esta es la foto de una lista (escrita a mano o impresa) de personas atendidas o localizadas en un hospital, refugio o centro de acopio tras un terremoto en Venezuela. Lee CADA renglón con cuidado y extrae TODOS los nombres de personas, aunque la letra sea difícil. Devuelve SOLO JSON válido con esta forma exacta: {\"personas\":[{\"nombre\":\"Nombre Apellido\",\"edad\":numero_o_null,\"estado\":\"texto_o_null\",\"nota\":\"texto_o_null\"}]}. Ignora encabezados, títulos, fechas y cualquier texto que no sea el nombre de una persona. No inventes nombres que no estén en la imagen.";
+
+// OCR con detail alto, suficientes tokens para listas largas, y un reintento si vuelve vacío.
+async function extractPersonas(image:string, OPENAI:string){
+  const mkBody=(extra:string)=>JSON.stringify({
+    model:"gpt-4o", temperature:0, max_tokens:4096, response_format:{type:"json_object"},
+    messages:[{role:"user",content:[
+      {type:"text",text:PROMPT+extra},
+      {type:"image_url",image_url:{url:image,detail:"high"}},
+    ]}],
+  });
+  let lastErr="";
+  for(let attempt=0; attempt<2; attempt++){
+    const extra = attempt ? " Es una pizarra o papel con varios nombres en columnas; recórrelas todas de arriba a abajo y no omitas ninguno." : "";
+    const oai = await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${OPENAI}`,"Content-Type":"application/json"},body:mkBody(extra)});
+    if(!oai.ok){ lastErr="OpenAI: "+(await oai.text()).slice(0,200); continue; }
+    const out = await oai.json();
+    let personas:any[]=[];
+    try{ personas = JSON.parse(out.choices?.[0]?.message?.content||"{}").personas || []; }catch{ personas=[]; }
+    if(Array.isArray(personas) && personas.length) return { personas, error:"" };
+  }
+  return { personas:[], error:lastErr };
+}
+
+// Crea (o reusa, dedup por nombre+centro) un cluster + record "localizado" para los nombres
+// de la lista que no coinciden con nadie del registro. Best-effort: si falla, no rompe el OCR.
+async function createLocalized(sb:any, nm:string, p:any, hospital:string|null, nowIso:string){
+  try{
+    const key = (await sha256(norm(nm)+"|"+norm(hospital||"hospital"))).slice(0,24);
+    const cid = "hospital_list:"+key;
+    const age = (typeof p?.edad==="number" && p.edad>0 && p.edad<120) ? Math.round(p.edad) : null;
+    const loc = String(hospital||"Hospital/centro de atención").slice(0,200);
+    const note = [p?.estado, p?.nota].filter(Boolean).map((x:any)=>String(x).slice(0,160)).join(" · ") || `Aparece en lista de ${loc}`;
+    const cluster = { id:cid, name:nm.slice(0,200), age, location:loc, status:"found", sources:["hospital_list"], n_sources:1, n_records:1, has_conflict:false, any_found:true, confidence:null, resolved:true, resolved_decision:"same_located" };
+    const { error: ce } = await sb.from("clusters").upsert(cluster, { onConflict:"id" });
+    if(ce) return null;
+    const { error: re } = await sb.from("records").upsert({
+      pk:"hospital_list:"+key, source:"hospital_list", source_id:key, name:nm.slice(0,200), name_norm:norm(nm),
+      age, gender:null, location:loc, status:"found", photo:null, id_number:null, contact:null,
+      description:note, source_date:nowIso, cluster_id:cid, verified:false,
+    }, { onConflict:"pk" });
+    if(re) return null;
+    return cluster;
+  }catch{ return null; }
+}
+
 Deno.serve(async (req)=>{
   if(req.method==="OPTIONS") return new Response("ok",{headers:cors});
   try{
@@ -35,27 +82,40 @@ Deno.serve(async (req)=>{
     const image_bytes=Math.floor(image.length*0.75);
     const { error: auditError }=await sb.from("hospital_ocr_events").insert({client_hash,uploaded_by:uploaded_by||null,hospital:hospital||null,image_bytes,status:"accepted"});
     if(auditError) return json({error:"No se pudo registrar la solicitud OCR"},500);
-    const prompt = "Lee esta foto de una lista de personas atendidas en un hospital o centro de acopio tras un terremoto en Venezuela. Extrae TODOS los nombres de personas. Devuelve SOLO JSON: {\"personas\":[{\"nombre\":\"...\",\"edad\":num_o_null,\"estado\":\"texto_o_null\",\"nota\":\"texto_o_null\"}]}. Ignora encabezados y texto que no sea nombre de persona.";
-    const oai = await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${OPENAI}`,"Content-Type":"application/json"},body:JSON.stringify({model:"gpt-4o",temperature:0,response_format:{type:"json_object"},messages:[{role:"user",content:[{type:"text",text:prompt},{type:"image_url",image_url:{url:image}}]}]})});
-    if(!oai.ok) return json({error:"OpenAI: "+(await oai.text()).slice(0,300)},502);
-    const out = await oai.json();
-    let personas=[]; try{ personas=(JSON.parse(out.choices?.[0]?.message?.content||"{}").personas)||[]; }catch{ personas=[]; }
-    const matches=[];
-    for(const p of personas.slice(0,60)){
+
+    const { personas, error: ocrError } = await extractPersonas(image, OPENAI);
+    if(!personas.length && ocrError) return json({error:ocrError},502);
+
+    const nowIso = new Date().toISOString();
+    const matches:any[] = [];
+    let created = 0;
+    for(const p of personas.slice(0,80)){
       const nm=String(p?.nombre||"").trim(); if(!nm) continue;
-      const toks=norm(nm).split(" ").filter(t=>t.length>=2);
-      let cands=[];
+      const toks=norm(nm).split(" ").filter((t)=>t.length>=2);
+      let cands:any[]=[];
       if(toks.length){
-        // Matching insensible a acentos y a orden de nombres (misma lógica que la búsqueda
-        // pública). Antes un ilike por la última palabra con acento perdía "Misaira Pérez".
+        // Matching insensible a acentos y a orden de nombres (mismo RPC que la búsqueda pública).
         const { data } = await sb.rpc("public_search_clusters",{p_term:nm,p_filter:"",p_limit:5,p_offset:0});
         cands=(data||[]).slice(0,5);
       }
-      matches.push({extracted:p,candidates:cands});
+      let wasCreated=false;
+      // Sin coincidencia y con nombre+apellido => crear como localizado (estuvo en el centro).
+      if(!cands.length && toks.length>=2){
+        const c = await createLocalized(sb, nm, p, hospital||null, nowIso);
+        if(c){ cands=[c]; wasCreated=true; created++; }
+      }
+      matches.push({ extracted:p, candidates:cands, created:wasCreated });
     }
-    const total_matched=matches.filter(m=>m.candidates.length).length;
-    const { error: insertError } = await sb.from("hospital_lists").insert({hospital:hospital||null,uploaded_by:uploaded_by||null,extracted:personas,matched_count:total_matched});
-    if(insertError) return json({error:"No se pudo guardar la lista OCR"},500);
-    return json({personas,matches,total_matched});
+    const total_matched = matches.filter((m)=>m.candidates.length && !m.created).length;
+
+    // Guardar la lista YA matcheada (qué se encontró y qué se creó).
+    const saved = matches.map((m)=>({
+      nombre:m.extracted?.nombre||null, edad:m.extracted?.edad??null, estado:m.extracted?.estado??null,
+      resultado: m.created ? "creado_localizado" : (m.candidates.length ? "coincidencia" : "sin_coincidencia"),
+      candidate_ids: m.candidates.map((c:any)=>c.id),
+    }));
+    await sb.from("hospital_lists").insert({ hospital:hospital||null, uploaded_by:uploaded_by||null, extracted:saved, matched_count:total_matched });
+
+    return json({ personas, matches, total_matched, created_count:created });
   }catch(e){ return json({error:errorMessage(e)},500); }
 });

@@ -303,7 +303,7 @@
 
   <!-- HOSPITALES -->
   <section class="view" id="v-hospitales">
-    <p class="narrative" style="font-size:16px">Sube una foto de una lista de hospital, refugio o centro de atención. El OCR extrae nombres y muestra posibles coincidencias en el registro.</p>
+    <p class="narrative" style="font-size:16px">Sube una foto de una lista de hospital, refugio o centro de atención. Leemos los nombres y mostramos coincidencias en el registro. <b>Los que no estén todavía se agregan como localizados</b>, para que sus familias los encuentren al buscar.</p>
     <div class="hospital-grid">
       <div class="uploadbox">
         <label for="hospitalName">Centro</label>
@@ -640,11 +640,12 @@ function renderHospitalResults(data){
   const box=document.getElementById("hospitalResults");
   const matches=data.matches||[];
   if(!matches.length){box.innerHTML=`<div class="empty"><div class="big">Sin nombres detectados</div>Prueba con una foto más nítida.</div>`; return;}
-  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · ${data.total_matched||0} con posibles coincidencias</div>`+
+  const created=data.created_count||0;
+  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · ${data.total_matched||0} con coincidencia${created?` · <span class="green">${created} agregados como localizados</span>`:""}</div>`+
     matches.map(m=>{
       const p=m.extracted||{}, c=m.candidates||[];
       return `<div class="h-match">
-        <div class="h-extracted"><b>${esc(p.nombre||"nombre sin leer")}</b><span>${p.edad?esc(p.edad)+" años":""}${p.estado?" · "+esc(p.estado):""}</span>${p.nota?`<span>${esc(p.nota)}</span>`:""}</div>
+        <div class="h-extracted"><b>${esc(p.nombre||"nombre sin leer")}</b><span>${p.edad?esc(p.edad)+" años":""}${p.estado?" · "+esc(p.estado):""}</span>${m.created?'<span class="verif">✓ agregado como localizada</span>':p.nota?`<span>${esc(p.nota)}</span>`:""}</div>
         ${c.length?`<div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`:`<div class="h-empty">Sin coincidencias claras en el registro</div>`}
       </div>`;
     }).join("");
