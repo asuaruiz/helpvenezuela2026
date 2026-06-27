@@ -87,31 +87,36 @@ Deno.serve(async (req)=>{
     if(!personas.length && ocrError) return json({error:ocrError},502);
 
     const nowIso = new Date().toISOString();
+    const isFound = (s:any)=> s==="found" || s==="found_alive";
     const matches:any[] = [];
-    let created = 0;
+    let created = 0, already = 0;
     for(const p of personas.slice(0,80)){
       const nm=String(p?.nombre||"").trim(); if(!nm) continue;
       const toks=norm(nm).split(" ").filter((t)=>t.length>=2);
       let cands:any[]=[];
       if(toks.length){
-        // Matching insensible a acentos y a orden de nombres (mismo RPC que la búsqueda pública).
+        // Reportes previos con ese nombre (mismo RPC que la búsqueda pública: acentos/orden).
         const { data } = await sb.rpc("public_search_clusters",{p_term:nm,p_filter:"",p_limit:5,p_offset:0});
         cands=(data||[]).slice(0,5);
       }
+      // Estar en la lista del hospital = la persona FUE LOCALIZADA. Si no existe ya un reporte
+      // localizado con ese nombre, se crea como localizado. Los reportes "por localizar" con el
+      // mismo nombre se muestran aparte para que un humano confirme si es la misma persona.
+      const alreadyLocated = cands.some((c)=>isFound(c.status));
       let wasCreated=false;
-      // Sin coincidencia y con nombre+apellido => crear como localizado (estuvo en el centro).
-      if(!cands.length && toks.length>=2){
+      if(toks.length>=2 && !alreadyLocated){
         const c = await createLocalized(sb, nm, p, hospital||null, nowIso);
-        if(c){ cands=[c]; wasCreated=true; created++; }
+        if(c){ wasCreated=true; created++; }
       }
-      matches.push({ extracted:p, candidates:cands, created:wasCreated });
+      if(alreadyLocated) already++;
+      matches.push({ extracted:p, candidates:cands, created:wasCreated, alreadyLocated });
     }
-    const total_matched = matches.filter((m)=>m.candidates.length && !m.created).length;
+    const total_matched = already;
 
     // Guardar la lista YA matcheada (qué se encontró y qué se creó).
     const saved = matches.map((m)=>({
       nombre:m.extracted?.nombre||null, edad:m.extracted?.edad??null, estado:m.extracted?.estado??null,
-      resultado: m.created ? "creado_localizado" : (m.candidates.length ? "coincidencia" : "sin_coincidencia"),
+      resultado: m.created ? "creado_localizado" : (m.alreadyLocated ? "ya_localizado" : (m.candidates.length ? "posible_match_pendiente" : "sin_coincidencia")),
       candidate_ids: m.candidates.map((c:any)=>c.id),
     }));
     await sb.from("hospital_lists").insert({ hospital:hospital||null, uploaded_by:uploaded_by||null, extracted:saved, matched_count:total_matched });

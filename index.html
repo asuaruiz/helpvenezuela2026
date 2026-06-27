@@ -641,13 +641,21 @@ function renderHospitalResults(data){
   const matches=data.matches||[];
   if(!matches.length){box.innerHTML=`<div class="empty"><div class="big">Sin nombres detectados</div>Prueba con una foto más nítida.</div>`; return;}
   const created=data.created_count||0;
-  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · ${data.total_matched||0} con coincidencia${created?` · <span class="green">${created} agregados como localizados</span>`:""}</div>`+
+  box.innerHTML=`<div style="color:var(--muted);font-size:13px;margin-bottom:2px">${(data.personas||[]).length} nombres detectados · ${data.total_matched||0} ya localizados${created?` · <span class="green">${created} agregados como localizados</span>`:""}</div>`+
     matches.map(m=>{
       const p=m.extracted||{}, c=m.candidates||[];
+      const badge=m.created?'<span class="verif">✓ agregado como localizada</span>':(p.nota?`<span>${esc(p.nota)}</span>`:"");
+      let body;
+      if(m.created){
+        body=c.length
+          ? `<div style="padding:7px 13px 0;color:var(--faint);font-size:12px;font-style:italic">Reportes previos con ese nombre — ¿es la misma persona?</div><div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`
+          : "";
+      }else{
+        body=c.length?`<div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`:`<div class="h-empty">Sin coincidencias claras en el registro</div>`;
+      }
       return `<div class="h-match">
-        <div class="h-extracted"><b>${esc(p.nombre||"nombre sin leer")}</b><span>${p.edad?esc(p.edad)+" años":""}${p.estado?" · "+esc(p.estado):""}</span>${m.created?'<span class="verif">✓ agregado como localizada</span>':p.nota?`<span>${esc(p.nota)}</span>`:""}</div>
-        ${c.length?`<div class="h-cands">${c.map(hospitalCandidate).join("")}</div>`:`<div class="h-empty">Sin coincidencias claras en el registro</div>`}
-      </div>`;
+        <div class="h-extracted"><b>${esc(p.nombre||"nombre sin leer")}</b><span>${p.edad?esc(p.edad)+" años":""}${p.estado?" · "+esc(p.estado):""}</span>${badge}</div>
+        ${body}</div>`;
     }).join("");
 }
 function hospitalCandidate(c){
