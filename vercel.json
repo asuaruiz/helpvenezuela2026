@@ -1,14 +1,12 @@
 {
   "rewrites": [
-    { "source": "/((?!.*\\.).*)", "destination": "/index.html" }
+    { "source": "/ficha/:slug/:id", "destination": "/index.html" },
+    { "source": "/ver-todos", "destination": "/index.html" },
+    { "source": "/foto-de-lista", "destination": "/index.html" },
+    { "source": "/resumen", "destination": "/index.html" },
+    { "source": "/revisar", "destination": "/index.html" }
   ],
   "headers": [
-    {
-      "source": "/((?!.*\\.).*)",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-cache" }
-      ]
-    },
     {
       "source": "/(.*)",
       "headers": [
